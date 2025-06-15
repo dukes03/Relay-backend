@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -11,7 +12,10 @@ type Peer struct {
 	LastSeen time.Time
 }
 
-var peers = make(map[string]*Peer)
+var (
+	peers     = make(map[string]*Peer)
+	peersLock sync.Mutex
+)
 
 func main() {
 	addr, err := net.ResolveUDPAddr("udp", ":9000")
@@ -25,7 +29,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 2048)
 	log.Println("Relay server started on :9000")
 
 	for {
@@ -36,16 +40,35 @@ func main() {
 		}
 
 		msg := buffer[:n]
-		log.Printf("Received %d bytes from %s", n, clientAddr)
+		registerPeer(clientAddr)
 
-		key := clientAddr.String()
-		peers[key] = &Peer{Addr: clientAddr, LastSeen: time.Now()}
+		log.Printf("Message from %s: %s", clientAddr, string(msg))
 
-		// Forward to other peers (basic relay logic)
-		for peerKey, peer := range peers {
-			if peerKey != key {
-				conn.WriteToUDP(msg, peer.Addr)
-				log.Printf("Forwarded message from %s to %s", key, peerKey)
+		// Relay to all other peers
+		relayToOthers(conn, msg, clientAddr)
+	}
+}
+
+func registerPeer(addr *net.UDPAddr) {
+	peersLock.Lock()
+	defer peersLock.Unlock()
+	key := addr.String()
+	if _, exists := peers[key]; !exists {
+		log.Println("New peer registered:", key)
+	}
+	peers[key] = &Peer{Addr: addr, LastSeen: time.Now()}
+}
+
+func relayToOthers(conn *net.UDPConn, msg []byte, sender *net.UDPAddr) {
+	peersLock.Lock()
+	defer peersLock.Unlock()
+	for key, peer := range peers {
+		if key != sender.String() {
+			_, err := conn.WriteToUDP(msg, peer.Addr)
+			if err != nil {
+				log.Printf("Failed to send to %s: %v", key, err)
+			} else {
+				log.Printf("Forwarded from %s to %s", sender, key)
 			}
 		}
 	}
